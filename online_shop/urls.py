@@ -22,5 +22,6 @@ from apps import users
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/users/", include("apps.users.urls", namespace="users")),
+    path("api/users/", include("apps.users.api_urls", namespace="users-api")),
+    path("users/", include("apps.users.urls", namespace="users")),
 ]
