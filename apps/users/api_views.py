@@ -2,6 +2,7 @@ import random
 from django.core.mail import send_mail
 from django.utils import timezone
 from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import User
@@ -57,7 +58,7 @@ class CodeVerificationView(APIView):
             try:
                 user = User.objects.get(email=email)
             except User.DoesNotExist:
-                return Response({"error": "Invalid email or code"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": "Invalid email or code."}, status=status.HTTP_400_BAD_REQUEST)
 
             expiration_time = user.code_created_at + timezone.timedelta(minutes=2)
             if timezone.now() > expiration_time:
@@ -104,7 +105,7 @@ class SignUpView(APIView):
         if user.is_active:
             return Response({'error': 'User is already active.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = SignUpSerializer(user, data=request.data, partial=True)
+        serializer = SignUpSerializer(user, data=request.data)
         if serializer.is_valid():
             serializer.save()
             user.is_active = True
@@ -122,3 +123,16 @@ class SignUpView(APIView):
             }
             return Response(response_data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActiveUserView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        if user.is_active:
+            return Response({'message': f'User {user.email} is active.'}, status=status.HTTP_200_OK)
+        else:
+            return Response({'message': f'User {user.email} is not active.'}, status=status.HTTP_403_FORBIDDEN)
+
+

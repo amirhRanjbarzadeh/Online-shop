@@ -20,6 +20,11 @@ class CustomValidator:
                 _("Password must contain at least one lowercase letter"),
                 code='password_no_lower',
             )
+        if not re.search(r'[0-9]', password):
+            raise ValidationError(
+                _("Password must contain at least one number"),
+                code='password_no_number',
+            )
         if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
             raise ValidationError(
                 _("Password must contain at least one special character"),
