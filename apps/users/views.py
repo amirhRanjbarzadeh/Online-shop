@@ -8,16 +8,25 @@ from rest_framework.views import APIView
 from .models import User
 from .serializers import EmailSerializer, CodeVerificationSerializer, SignUpSerializer
 from django.conf import settings
-from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from rest_framework_simplejwt.tokens import RefreshToken
 from drf_yasg.utils import swagger_auto_schema
-
+from drf_yasg import openapi
 
 class RequestCodeView(APIView):
     """
     View to handle the first step where a user enters their email.
     """
 
-    @swagger_auto_schema(request_body=EmailSerializer)  # Explicitly tell Swagger to expect this serializer
+    @swagger_auto_schema(
+        request_body=EmailSerializer,
+        responses={
+            201: openapi.Response(
+                description="A code has been sent to your email.",
+                examples={"application/json": {"message": "A code has been sent to your email.", "verify_url": "/verify-code/"}}
+            ),
+            400: openapi.Response(description="Invalid email.")
+        }
+    )
     def post(self, request):
         serializer = EmailSerializer(data=request.data)
 
@@ -54,6 +63,18 @@ class CodeVerificationView(APIView):
     """
     View to handle code verification.
     """
+
+    @swagger_auto_schema(
+        request_body=CodeVerificationSerializer,
+        responses={
+            200: openapi.Response(
+                description="Login successful, redirecting to home or sign up.",
+                examples={"application/json": {"message": "Login successful, redirecting to home", "access_token": "<JWT_TOKEN>", "refresh_token": "<REFRESH_TOKEN>", "verify_url": "/home/"}}
+            ),
+            400: openapi.Response(description="Invalid email or code."),
+            302: openapi.Response(description="Redirecting to home.")
+        }
+    )
     def post(self, request):
         serializer = CodeVerificationSerializer(data=request.data)
         if serializer.is_valid():
@@ -100,6 +121,17 @@ class SignUpView(APIView):
     """
     View to handle the sign up process.
     """
+
+    @swagger_auto_schema(
+        request_body=SignUpSerializer,
+        responses={
+            200: openapi.Response(
+                description="Login successful, redirecting to home.",
+                examples={"application/json": {"message": "Login successful, redirecting to home", "access_token": "<JWT_TOKEN>", "refresh_token": "<REFRESH_TOKEN>", "verify_url": "/home/"}}
+            ),
+            400: openapi.Response(description="User does not exist or already active.")
+        }
+    )
     def post(self, request):
         email = request.data.get('email')
         try:
@@ -133,11 +165,15 @@ class SignUpView(APIView):
 class ActiveUserView(APIView):
     permission_classes = (IsAuthenticated,)
 
+    @swagger_auto_schema(
+        responses={
+            200: openapi.Response(description="User is active."),
+            403: openapi.Response(description="User is not active.")
+        }
+    )
     def get(self, request):
         user = request.user
         if user.is_active:
             return Response({'message': f'User {user.email} is active.'}, status=status.HTTP_200_OK)
         else:
             return Response({'message': f'User {user.email} is not active.'}, status=status.HTTP_403_FORBIDDEN)
-
-
