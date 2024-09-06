@@ -1,102 +1,143 @@
-from django.shortcuts import render, redirect
-from django.views import View
-from .forms import EmailForm, CodeVerificationForm, SignUpForm
-from django.http import JsonResponse, HttpResponse
-import requests
-from django.urls import reverse
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework.exceptions import AuthenticationFailed
+import random
+from django.core.mail import send_mail
+from django.utils import timezone
+from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from .models import User
+from .serializers import EmailSerializer, CodeVerificationSerializer, SignUpSerializer
+from django.conf import settings
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from drf_yasg.utils import swagger_auto_schema
 
 
-class HomePage(View):
-    def get(self, request):
-        auth = JWTAuthentication()
-        user = None
-        try:
-            # Authenticate the request
-            result = auth.authenticate(request)
-            if result is not None:
-                user, _ = result
-            else:
-                # If authentication returns None
-                return redirect('users:request-code')
-        except AuthenticationFailed:
-            # Handle authentication failure
-            return redirect('users:request-code')
+class RequestCodeView(APIView):
+    """
+    View to handle the first step where a user enters their email.
+    """
 
-        if user is not None:
-            # User is authenticated
-            return HttpResponse("hello world")
-        else:
-            # User is not authenticated
-            return redirect('users:request-code')
-
-
-class RequestCodePage(View):
-    def get(self, request):
-        form = EmailForm()
-        return render(request, "users/request_code.html", {"form": form})
-
-    def post(self, request, *args, **kwargs):
-        form = EmailForm(request.POST)
-        if form.is_valid():
-            api_url = request.build_absolute_uri(reverse('users-api:request-code'))
-            response = requests.post(api_url, json=form.cleaned_data)
-            if response.status_code == 201:
-                request.session['email'] = form.cleaned_data['email']
-                return redirect('users:verify-code')
-            else:
-                return JsonResponse(response.json(), status=response.status_code)
-        return render(request, "users/request_code.html", {"form": form})
-
-
-class VerifyCodePage(View):
-    def get(self, request):
-        email = request.session.get('email', "")
-        form = CodeVerificationForm(initial={'email': email})
-        return render(request, 'users/verify_code.html', {'form': form})
-
+    @swagger_auto_schema(request_body=EmailSerializer)  # Explicitly tell Swagger to expect this serializer
     def post(self, request):
-        form = CodeVerificationForm(request.POST)
-        if form.is_valid():
-            api_url = request.build_absolute_uri(reverse('users-api:verify-code'))
-            response = requests.post(api_url, json=form.cleaned_data)
-            if response.status_code == 302:
-                return redirect('users:home')
-            elif response.status_code == 200:
-                return redirect('users:sign-up')
-            else:
-                return JsonResponse(response.json(), status=response.status_code)
+        serializer = EmailSerializer(data=request.data)
+
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            code = ''.join([str(random.randint(0, 9)) for _ in range(8)])
+
+            user, created = User.objects.get_or_create(email=email)
+            if created:
+                user.is_active = False  # Mark user inactive until verified
+            user.set_password(code)
+            user.code_created_at = timezone.now()
+            user.save()
+
+            send_mail(
+                "Your Login Code",
+                f"Your login code is {code}",
+                settings.EMAIL_HOST_USER,
+                [email],
+                fail_silently=False,
+            )
+
+            response_data = {
+                "message": "A code has been sent to your email.",
+                "verify_url": request.build_absolute_uri('/verify-code/')
+            }
+
+            return Response(response_data, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class SignUpPage(View):
-    def get(self, request):
-        email = request.session.get('email', "")
-        if not email:
-            return redirect('users:request-code')
-
-        form = SignUpForm()
-        return render(request, "users/sign_up.html", {"form": form})
-
+class CodeVerificationView(APIView):
+    """
+    View to handle code verification.
+    """
     def post(self, request):
-        email = request.session.get('email', "")
-        if not email:
-            return redirect('users:request-code')
+        serializer = CodeVerificationSerializer(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            code = serializer.validated_data['code']
 
-        form = SignUpForm(request.POST)
-        if form.is_valid():
             try:
-                data = form.cleaned_data
-                data['email'] = email
-                api_url = request.build_absolute_uri(reverse('users-api:sign-up'))
-                response = requests.post(api_url, json=data)
-                if response.status_code == 200:
-                    return redirect('users:home')  # Redirect to home or another page on success
-                else:
-                    form.add_error(None, "An error occurred. Please try again.")
-            except requests.exceptions.RequestException as e:
-                form.add_error(None, "A connection error occurred. Please try again.")
+                user = User.objects.get(email=email)
+            except User.DoesNotExist:
+                return Response({"error": "Invalid email or code."}, status=status.HTTP_400_BAD_REQUEST)
 
-        return render(request, 'users/sign_up.html', {'form': form})
+            expiration_time = user.code_created_at + timezone.timedelta(minutes=2)
+            if timezone.now() > expiration_time:
+                return Response({'error': 'The code has expired. Please request a new code.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            if user.check_password(code):
+                if user.is_active:
+                    refresh = RefreshToken.for_user(user)
+                    access_token = str(refresh.access_token)
+                    refresh_token = str(refresh)
+
+                    response_data = {
+                        "message": "Login successful, redirecting to home",
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                        "verify_url": request.build_absolute_uri('/home/')
+                    }
+
+                    return Response(response_data, status=status.HTTP_302_FOUND)
+                else:
+                    response_data = {
+                        "message": "New user, redirecting to signup.",
+                        "verify_url": request.build_absolute_uri('/sign-up/')
+                    }
+                    return Response(response_data, status=status.HTTP_200_OK)
+            else:
+                return Response({'error': 'Invalid email or code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SignUpView(APIView):
+    """
+    View to handle the sign up process.
+    """
+    def post(self, request):
+        email = request.data.get('email')
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({'error': 'User does not exist.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if user.is_active:
+            return Response({'error': 'User is already active.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = SignUpSerializer(user, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            user.is_active = True
+            user.save()
+
+            refresh = RefreshToken.for_user(user)
+            access_token = str(refresh.access_token)
+            refresh_token = str(refresh)
+
+            response_data = {
+                "message": "Login successful, redirecting to home",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "verify_url": request.build_absolute_uri('/home/')
+            }
+            return Response(response_data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ActiveUserView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        if user.is_active:
+            return Response({'message': f'User {user.email} is active.'}, status=status.HTTP_200_OK)
+        else:
+            return Response({'message': f'User {user.email} is not active.'}, status=status.HTTP_403_FORBIDDEN)
 
 
